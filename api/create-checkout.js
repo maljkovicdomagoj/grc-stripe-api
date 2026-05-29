@@ -18,6 +18,9 @@ const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 const FROM_EMAIL = process.env.FROM_EMAIL || 'GRC Stack Search <onboarding@resend.dev>';
 const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || 'https://stack.grcreport.com';
 
+const SUCCESS_PATH = process.env.SUCCESS_PATH || '/questionaire---thank-you-page';
+const CANCEL_PATH = process.env.CANCEL_PATH || '/questionaire---submission-cancelled';
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email', 'companyName'];
 
@@ -70,8 +73,8 @@ export default async function handler(req, res) {
             mode: 'payment',
             line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
             customer_email: body.email,
-            success_url: `${PUBLIC_SITE_URL}/submission-success?session_id={CHECKOUT_SESSION_ID}&sid=${submissionId}`,
-            cancel_url: `${PUBLIC_SITE_URL}/submission-cancelled?sid=${submissionId}`,
+            success_url: `${PUBLIC_SITE_URL}${SUCCESS_PATH}?session_id={CHECKOUT_SESSION_ID}&sid=${submissionId}`,
+            cancel_url: `${PUBLIC_SITE_URL}${CANCEL_PATH}?sid=${submissionId}`,
             metadata: {
                 submissionId,
                 companyName: companyName.slice(0, 500),
