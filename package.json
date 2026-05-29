@@ -1,0 +1,14 @@
+{
+  "name": "grc-stripe-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stripe Checkout + email notification backend for GRC Stack Search questionnaire",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "stripe": "^17.5.0",
+    "resend": "^4.0.1"
+  }
+}
