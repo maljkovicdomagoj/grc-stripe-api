@@ -1,7 +1,7 @@
 // =====================================================================
 // CONFIG — change API_ENDPOINT after Vercel deploy
 // =====================================================================
-const API_ENDPOINT = 'https://YOUR-VERCEL-DOMAIN.vercel.app/api/create-checkout';
+const API_ENDPOINT = 'https://grc-stripe-api.vercel.app/api/create-checkout';
 const TOTAL_PAGES = 20;
 const AUTOSAVE_DELAY = 1000;
 const STORAGE_KEY = 'grcQuestionnaire';
