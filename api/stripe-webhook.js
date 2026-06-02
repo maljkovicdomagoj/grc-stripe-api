@@ -1,18 +1,22 @@
 // POST /api/stripe-webhook
-// Receives signed events from Stripe. On checkout.session.completed,
-// sends a "Payment Received" confirmation email.
+// On checkout.session.completed:
+//   1. Verifies Stripe signature (rejects unsigned/tampered requests)
+//   2. Checks idempotency — skip if event already processed (Stripe may retry)
+//   3. Pulls full form data from Vercel KV using submissionId
+//   4. Creates a draft Webflow CMS item (status: paid) — William publishes manually after review
+//   5. Sends paid confirmation email to NOTIFICATION_EMAIL
+//   6. Cleans up KV
 //
-// IMPORTANT: requires bodyParser:false so Stripe signature verification
-// can run against the raw request body bytes.
+// On checkout.session.expired and payment_intent.payment_failed: logged only.
 
 import Stripe from 'stripe';
 import { Resend } from 'resend';
 import { paidEmailHTML } from '../lib/emails.js';
+import { getSubmission, deleteSubmission, markEventProcessed } from '../lib/kv.js';
+import { createSubmissionItem } from '../lib/webflow.js';
 
 export const config = {
-    api: {
-        bodyParser: false,
-    },
+    api: { bodyParser: false },
 };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -53,17 +57,64 @@ export default async function handler(req, res) {
     try {
         switch (event.type) {
             case 'checkout.session.completed': {
+                // === Idempotency check — skip if Stripe already retried this event ===
+                const alreadyProcessed = await markEventProcessed(event.id);
+                if (alreadyProcessed) {
+                    console.log(`Event ${event.id} already processed — skipping`);
+                    return res.status(200).json({ received: true, duplicate: true });
+                }
+
                 const session = event.data.object;
                 const meta = session.metadata || {};
+                const submissionId = meta.submissionId;
                 const isTestMode = event.livemode === false;
 
+                // === Pull full form data from KV ===
+                let kvData = null;
+                if (submissionId) {
+                    try {
+                        kvData = await getSubmission(submissionId);
+                    } catch (err) {
+                        console.error('KV get failed:', err);
+                    }
+                }
+
+                if (!kvData) {
+                    console.warn(`No KV data for submission ${submissionId} — CMS write will use Stripe metadata only`);
+                }
+
+                // === Create Webflow CMS item (draft, William publishes after review) ===
+                let cmsItemCreated = false;
+                let cmsErrorMsg = null;
+                try {
+                    await createSubmissionItem({
+                        submissionId: submissionId || `unknown-${event.id}`,
+                        companyName: kvData?.companyName || meta.companyName || 'Unknown',
+                        contactName: kvData?.contactName || meta.contactName || '',
+                        contactEmail: kvData?.contactEmail || meta.contactEmail || '',
+                        contactPhone: kvData?.contactPhone || '',
+                        website: kvData?.website || '',
+                        submittedAt: kvData?.submittedAt || meta.submittedAt || new Date().toISOString(),
+                        paidAt: new Date().toISOString(),
+                        stripeSessionId: session.id,
+                        stripePaymentIntent: session.payment_intent || '',
+                        amountCents: session.amount_total || 0,
+                        fullData: kvData?.formData || {},
+                    });
+                    cmsItemCreated = true;
+                } catch (cmsErr) {
+                    console.error('Webflow CMS create failed:', cmsErr);
+                    cmsErrorMsg = cmsErr?.message || String(cmsErr);
+                }
+
+                // === Send paid confirmation email ===
                 try {
                     await resend.emails.send({
                         from: FROM_EMAIL,
                         to: NOTIFICATION_EMAIL,
-                        subject: `✅ Payment received — ${meta.companyName || 'Unknown company'}`,
+                        subject: `✅ Payment received — ${meta.companyName || 'Unknown company'}${cmsItemCreated ? '' : ' (⚠️ CMS write failed)'}`,
                         html: paidEmailHTML({
-                            submissionId: meta.submissionId,
+                            submissionId,
                             companyName: meta.companyName,
                             contactName: meta.contactName,
                             contactEmail: meta.contactEmail,
@@ -73,16 +124,28 @@ export default async function handler(req, res) {
                             sessionId: session.id,
                             paymentIntent: session.payment_intent,
                             isTestMode,
+                            cmsItemCreated,
+                            cmsErrorMsg,
                         }),
                     });
                 } catch (emailErr) {
                     console.error('Paid email failed:', emailErr);
-                    // Don't 500 — Stripe will retry the webhook, we'd get duplicate emails
                 }
+
+                // === Clean up KV (free space, not strictly necessary thanks to TTL) ===
+                if (submissionId && kvData) {
+                    try {
+                        await deleteSubmission(submissionId);
+                    } catch (err) {
+                        console.error('KV delete failed (non-fatal):', err);
+                    }
+                }
+
                 break;
             }
             case 'checkout.session.expired':
                 console.log('Checkout session expired:', event.data.object.id);
+                // Future: send "submission abandoned" email if desired
                 break;
             case 'payment_intent.payment_failed':
                 console.log('Payment failed:', event.data.object.id, event.data.object.last_payment_error?.message);
