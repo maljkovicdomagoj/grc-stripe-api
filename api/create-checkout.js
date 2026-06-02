@@ -23,9 +23,6 @@ const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || 'https://www.grcreport.co
 const SUCCESS_PATH = process.env.SUCCESS_PATH || '/questionaire---thank-you-page';
 const CANCEL_PATH = process.env.CANCEL_PATH || '/questionaire---submission-cancelled';
 
-const SUCCESS_PATH = process.env.SUCCESS_PATH || '/questionaire---thank-you-page';
-const CANCEL_PATH = process.env.CANCEL_PATH || '/questionaire---submission-cancelled';
-
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email', 'companyName'];
 
