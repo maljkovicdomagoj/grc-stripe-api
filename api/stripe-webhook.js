@@ -11,7 +11,7 @@
 
 import Stripe from 'stripe';
 import { Resend } from 'resend';
-import { paidEmailHTML } from '../lib/emails.js';
+import { paidEmailHTML, getNotificationRecipients } from '../lib/emails.js';
 import { getSubmission, deleteSubmission, markEventProcessed } from '../lib/kv.js';
 import { createSubmissionItem } from '../lib/webflow.js';
 
@@ -111,7 +111,7 @@ export default async function handler(req, res) {
                 try {
                     await resend.emails.send({
                         from: FROM_EMAIL,
-                        to: NOTIFICATION_EMAIL,
+                        to: getNotificationRecipients(),
                         subject: `✅ Payment received — ${meta.companyName || 'Unknown company'}${cmsItemCreated ? '' : ' (⚠️ CMS write failed)'}`,
                         html: paidEmailHTML({
                             submissionId,

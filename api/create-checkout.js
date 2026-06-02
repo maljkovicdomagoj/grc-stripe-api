@@ -9,7 +9,7 @@ import Stripe from 'stripe';
 import { Resend } from 'resend';
 import { randomUUID } from 'node:crypto';
 import { applyCors } from '../lib/cors.js';
-import { pendingEmailHTML } from '../lib/emails.js';
+import { pendingEmailHTML, getNotificationRecipients } from '../lib/emails.js';
 import { storeSubmission } from '../lib/kv.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -107,7 +107,7 @@ export default async function handler(req, res) {
         try {
             await resend.emails.send({
                 from: FROM_EMAIL,
-                to: NOTIFICATION_EMAIL,
+                to: getNotificationRecipients(),
                 reply_to: body.email,
                 subject: `🟡 New submission (awaiting payment) — ${companyName}`,
                 html: pendingEmailHTML({
