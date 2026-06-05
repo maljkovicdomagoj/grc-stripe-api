@@ -92,6 +92,7 @@ export default async function handler(req, res) {
             mode: 'payment',
             line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
             customer_email: body.email,
+            allow_promotion_codes: true,
             success_url: `${PUBLIC_SITE_URL}${SUCCESS_PATH}?session_id={CHECKOUT_SESSION_ID}&sid=${submissionId}`,
             cancel_url: `${PUBLIC_SITE_URL}${CANCEL_PATH}?sid=${submissionId}`,
             metadata: {
