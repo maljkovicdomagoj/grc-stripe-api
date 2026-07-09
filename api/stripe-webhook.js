@@ -100,6 +100,8 @@ export default async function handler(req, res) {
                         stripePaymentIntent: session.payment_intent || '',
                         amountCents: session.amount_total || 0,
                         fullData: kvData?.formData || {},
+                        active: true,
+                        status: 'paid',
                     });
                     cmsItemCreated = true;
                 } catch (cmsErr) {

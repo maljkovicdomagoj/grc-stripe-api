@@ -1,27 +1,23 @@
-// POST /api/create-checkout
+// POST /api/create-free-submission
 // 1. Validates form data (required fields, email format, honeypot)
-// 2. Stores full form data in Vercel KV (24h TTL) — webhook reads this later for CMS write
-// 3. Sends pending email to NOTIFICATION_EMAIL with PDF + file attachments
-// 4. Creates Stripe Checkout session with submissionId in metadata
-// 5. Returns { checkoutUrl, submissionId } to client
+// 2. Creates a draft Webflow CMS item immediately — Active=false, status=pending
+//    (William publishes/activates manually, or it flips to Active on later payment)
+// 3. Sends a free-submission email to NOTIFICATION_EMAIL with PDF + file attachments
+// 4. Returns { ok: true, submissionId }
+//
+// No Stripe checkout, no Vercel KV — unlike the paid flow, the CMS item is written
+// synchronously here since there's no webhook step to defer it to.
 
-import Stripe from 'stripe';
-import { Resend } from 'resend';
 import { randomUUID } from 'node:crypto';
+import { Resend } from 'resend';
 import { applyCors } from '../lib/cors.js';
-import { pendingEmailHTML, getNotificationRecipients, buildEmailAttachments } from '../lib/emails.js';
-import { storeSubmission } from '../lib/kv.js';
+import { freeEmailHTML, getNotificationRecipients, buildEmailAttachments } from '../lib/emails.js';
+import { createSubmissionItem } from '../lib/webflow.js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL;
-const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 const FROM_EMAIL = process.env.FROM_EMAIL || 'GRC Stack Search <onboarding@resend.dev>';
-const PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || 'https://www.grcreport.com';
-
-const SUCCESS_PATH = process.env.SUCCESS_PATH || '/questionaire---thank-you-page';
-const CANCEL_PATH = process.env.CANCEL_PATH || '/questionaire---submission-cancelled';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email', 'companyName'];
@@ -31,7 +27,7 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(204).end();
     if (req.method !== 'POST') return res.status(405).json({ message: 'Method not allowed' });
 
-    if (!STRIPE_PRICE_ID || !process.env.STRIPE_SECRET_KEY || !NOTIFICATION_EMAIL || !process.env.RESEND_API_KEY) {
+    if (!NOTIFICATION_EMAIL || !process.env.RESEND_API_KEY) {
         console.error('Missing required env vars');
         return res.status(500).json({ message: 'Server configuration error. Please contact wg@grcreport.com.' });
     }
@@ -42,7 +38,7 @@ export default async function handler(req, res) {
         // Honeypot — silently reject bots
         if (body.website_url_hp && String(body.website_url_hp).trim() !== '') {
             console.warn('Honeypot triggered from IP:', req.headers['x-forwarded-for']);
-            return res.status(200).json({ checkoutUrl: PUBLIC_SITE_URL, submissionId: 'bot-' + randomUUID() });
+            return res.status(200).json({ ok: true, submissionId: 'bot-' + randomUUID() });
         }
 
         // Required field validation
@@ -60,53 +56,39 @@ export default async function handler(req, res) {
         const contactName = `${body.firstName} ${body.lastName}`.trim();
         const submittedAt = new Date().toISOString();
 
-        // Extract PDF and file attachments separately (don't store in KV — base64 is huge)
         const pdfBase64 = body.pdfBase64;
         const pdfFilename = body.pdfFilename || `GRC-Submission-${submissionId}.pdf`;
         const incomingAttachments = Array.isArray(body.fileAttachments) ? body.fileAttachments : [];
 
-        // Build clean data for email AND KV storage (no PDF, no attachments, no honeypot)
         const cleanData = { ...body };
         delete cleanData.pdfBase64;
         delete cleanData.pdfFilename;
         delete cleanData.fileAttachments;
         delete cleanData.website_url_hp;
 
-        // Persist form data in Vercel KV so the webhook can write it to Webflow CMS later.
-        // Non-fatal — if KV write fails, checkout still proceeds but CMS write will be skipped.
+        // === Create Webflow CMS item immediately as an Inactive draft ===
+        let cmsItemCreated = false;
+        let cmsErrorMsg = null;
         try {
-            await storeSubmission(submissionId, {
+            await createSubmissionItem({
                 submissionId,
-                submittedAt,
-                contactName,
                 companyName,
+                contactName,
                 contactEmail: body.email,
                 contactPhone: body.phone || '',
                 website: body.website || '',
-                formData: cleanData,
+                submittedAt,
+                fullData: cleanData,
+                active: false,
+                status: 'pending',
             });
-        } catch (kvErr) {
-            console.error('KV store failed (non-fatal — CMS write will be skipped):', kvErr);
+            cmsItemCreated = true;
+        } catch (cmsErr) {
+            console.error('Webflow CMS create failed (non-fatal — free submission still recorded via email):', cmsErr);
+            cmsErrorMsg = cmsErr?.message || String(cmsErr);
         }
 
-        // Create Stripe Checkout session
-        const session = await stripe.checkout.sessions.create({
-            mode: 'payment',
-            line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
-            customer_email: body.email,
-            allow_promotion_codes: true,
-            success_url: `${PUBLIC_SITE_URL}${SUCCESS_PATH}?session_id={CHECKOUT_SESSION_ID}&sid=${submissionId}`,
-            cancel_url: `${PUBLIC_SITE_URL}${CANCEL_PATH}?sid=${submissionId}`,
-            metadata: {
-                submissionId,
-                companyName: companyName.slice(0, 500),
-                contactEmail: body.email.slice(0, 500),
-                contactName: contactName.slice(0, 500),
-                submittedAt,
-            },
-        });
-
-        // Send pending email with PDF + file attachments (non-fatal)
+        // === Send free-submission email with PDF + attachments (non-fatal) ===
         try {
             const { attachments, skipped: attachmentsSkipped } = buildEmailAttachments({
                 pdfBase64,
@@ -118,26 +100,24 @@ export default async function handler(req, res) {
                 from: FROM_EMAIL,
                 to: getNotificationRecipients(),
                 reply_to: body.email,
-                subject: `🟡 New submission (awaiting payment) — ${companyName}`,
-                html: pendingEmailHTML({
+                subject: `🆓 Free submission (Inactive) — ${companyName}`,
+                html: freeEmailHTML({
                     submissionId,
                     data: cleanData,
-                    checkoutUrl: session.url,
+                    cmsItemCreated,
+                    cmsErrorMsg,
                     attachmentsSkipped,
                 }),
                 attachments,
             });
         } catch (emailErr) {
-            console.error('Pending email failed (non-fatal):', emailErr);
+            console.error('Free submission email failed (non-fatal):', emailErr);
         }
 
-        return res.status(200).json({
-            checkoutUrl: session.url,
-            submissionId,
-        });
+        return res.status(200).json({ ok: true, submissionId });
     } catch (err) {
-        console.error('create-checkout error:', err);
-        const message = err?.raw?.message || err?.message || 'Server error. Please try again or contact wg@grcreport.com.';
+        console.error('create-free-submission error:', err);
+        const message = err?.message || 'Server error. Please try again or contact wg@grcreport.com.';
         return res.status(500).json({ message });
     }
 }

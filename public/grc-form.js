@@ -2,10 +2,20 @@
 // CONFIG — change API_ENDPOINT after Vercel deploy
 // =====================================================================
 const API_ENDPOINT = 'https://grc-stripe-api.vercel.app/api/create-checkout';
-const TOTAL_PAGES = 20;
+const FREE_API_ENDPOINT = 'https://grc-stripe-api.vercel.app/api/create-free-submission';
+const TOTAL_PAGES = document.querySelectorAll('.page').length || 22;
 const AUTOSAVE_DELAY = 1000;
 const STORAGE_KEY = 'grcQuestionnaire';
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// File attachment limits (product images + materials on page 21)
+const MAX_IMAGES = 3;
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_MATERIALS = 10;
+const MAX_MATERIAL_SIZE = 5 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENTS_SIZE = 20 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg'];
+const ALLOWED_MATERIAL_TYPES = ['application/pdf'];
 
 // =====================================================================
 // STATE
@@ -23,7 +33,12 @@ const formAlert = document.getElementById('formAlert');
 const nextBtn = document.getElementById('nextBtn');
 const prevBtn = document.getElementById('prevBtn');
 const submitBtn = document.getElementById('submitBtn');
+const submitFreeBtn = document.getElementById('submitFreeBtn');
 const exportPdfBtn = document.getElementById('exportPdfBtn');
+const productImagesInput = document.getElementById('productImages');
+const productMaterialsInput = document.getElementById('productMaterials');
+const imagesHint = document.getElementById('imagesHint');
+const materialsHint = document.getElementById('materialsHint');
 const submissionPopup = document.getElementById('submissionPopup');
 const popupTitle = document.getElementById('popupTitle');
 const popupMessage = document.getElementById('popupMessage');
@@ -136,6 +151,22 @@ function validatePage(pageNum) {
     return true;
 }
 
+// Validates every page (not just the current one) — used before either submit path.
+// Returns the first invalid page number, or null if the whole form is valid.
+function validateAllPages() {
+    let firstInvalidPage = null;
+    for (let p = 1; p <= TOTAL_PAGES; p++) {
+        const page = document.querySelector(`[data-page="${p}"]`);
+        if (!page) continue;
+        let pageOk = true;
+        page.querySelectorAll('input, select, textarea').forEach(field => {
+            if (!validateField(field)) pageOk = false;
+        });
+        if (!pageOk && firstInvalidPage === null) firstInvalidPage = p;
+    }
+    return firstInvalidPage;
+}
+
 // =====================================================================
 // AUTO-SAVE
 // =====================================================================
@@ -145,6 +176,7 @@ function saveFormData() {
     const payload = { currentPage };
     for (const [key, val] of data.entries()) {
         if (key === 'website_url_hp') continue; // never persist honeypot
+        if (key === 'productImages' || key === 'productMaterials') continue; // File objects — not persistable
         payload[key] = val;
     }
     try {
@@ -349,6 +381,95 @@ function getPDFAsBase64() {
 }
 
 // =====================================================================
+// FILE ATTACHMENTS (page 21 — product images + materials)
+// =====================================================================
+function updateFileHints() {
+    const imageCount = productImagesInput?.files ? productImagesInput.files.length : 0;
+    const materialCount = productMaterialsInput?.files ? productMaterialsInput.files.length : 0;
+    if (imagesHint) imagesHint.textContent = `${imageCount} / ${MAX_IMAGES} selected`;
+    if (materialsHint) materialsHint.textContent = `${materialCount} / ${MAX_MATERIALS} selected`;
+}
+
+// Validates one file input against count/type/size limits. On violation, clears the
+// input (browsers won't let us remove individual files from a FileList) and shows
+// the shared form alert so the user knows to reselect.
+function validateFileInput(input, { max, maxSize, allowedTypes, label }) {
+    if (!input) return true;
+    const files = input.files ? Array.from(input.files) : [];
+    if (files.length > max) {
+        showFormAlert(`You can attach up to ${max} ${label}.`);
+        input.value = '';
+        return false;
+    }
+    for (const file of files) {
+        if (!allowedTypes.includes(file.type)) {
+            showFormAlert(`"${file.name}" is not an allowed file type for ${label}.`);
+            input.value = '';
+            return false;
+        }
+        if (file.size > maxSize) {
+            showFormAlert(`"${file.name}" exceeds the ${(maxSize / (1024 * 1024)).toFixed(0)}MB limit for ${label}.`);
+            input.value = '';
+            return false;
+        }
+    }
+    return true;
+}
+
+function enforceFileLimits() {
+    const imagesOk = validateFileInput(productImagesInput, {
+        max: MAX_IMAGES, maxSize: MAX_IMAGE_SIZE, allowedTypes: ALLOWED_IMAGE_TYPES, label: 'product images (PNG/JPEG)',
+    });
+    const materialsOk = validateFileInput(productMaterialsInput, {
+        max: MAX_MATERIALS, maxSize: MAX_MATERIAL_SIZE, allowedTypes: ALLOWED_MATERIAL_TYPES, label: 'product material PDFs',
+    });
+
+    let totalSize = 0;
+    if (productImagesInput?.files) for (const f of productImagesInput.files) totalSize += f.size;
+    if (productMaterialsInput?.files) for (const f of productMaterialsInput.files) totalSize += f.size;
+
+    let totalOk = true;
+    if (totalSize > MAX_TOTAL_ATTACHMENTS_SIZE) {
+        showFormAlert(`Total attachments (images + PDFs) must be under ${(MAX_TOTAL_ATTACHMENTS_SIZE / (1024 * 1024)).toFixed(0)}MB combined.`);
+        totalOk = false;
+    }
+
+    updateFileHints();
+    return imagesOk && materialsOk && totalOk;
+}
+
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result || '';
+            const commaIdx = result.indexOf(',');
+            resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error('File read failed.'));
+        reader.readAsDataURL(file);
+    });
+}
+
+// Reads the selected product images + materials and returns them as
+// [{ filename, content(base64), type }], ready to attach to the submit payload.
+async function collectFileAttachments() {
+    const files = [
+        ...(productImagesInput?.files ? Array.from(productImagesInput.files) : []),
+        ...(productMaterialsInput?.files ? Array.from(productMaterialsInput.files) : []),
+    ];
+    const attachments = [];
+    for (const file of files) {
+        const content = await fileToBase64(file);
+        attachments.push({ filename: file.name, content, type: file.type });
+    }
+    return attachments;
+}
+
+if (productImagesInput) productImagesInput.addEventListener('change', enforceFileLimits);
+if (productMaterialsInput) productMaterialsInput.addEventListener('change', enforceFileLimits);
+
+// =====================================================================
 // POPUP
 // =====================================================================
 function showSubmissionPopup(msg, kind = 'success') {
@@ -382,6 +503,7 @@ function gatherFormPayload() {
     const data = new FormData(formElement);
     const payload = {};
     for (const [key, val] of data.entries()) {
+        if (key === 'productImages' || key === 'productMaterials') continue; // File objects — sent separately via fileAttachments
         // include honeypot so server can detect bots, but in a known field
         payload[key] = val;
     }
@@ -398,16 +520,7 @@ async function submitToCheckout() {
     if (isSubmitting) return;
 
     // Final validation across all pages, not just current one
-    let firstInvalidPage = null;
-    for (let p = 1; p <= TOTAL_PAGES; p++) {
-        const page = document.querySelector(`[data-page="${p}"]`);
-        if (!page) continue;
-        let pageOk = true;
-        page.querySelectorAll('input, select, textarea').forEach(field => {
-            if (!validateField(field)) pageOk = false;
-        });
-        if (!pageOk && firstInvalidPage === null) firstInvalidPage = p;
-    }
+    const firstInvalidPage = validateAllPages();
     if (firstInvalidPage !== null) {
         currentPage = firstInvalidPage;
         showPage(currentPage);
@@ -418,6 +531,8 @@ async function submitToCheckout() {
         );
         return;
     }
+
+    if (!enforceFileLimits()) return;
 
     isSubmitting = true;
     const originalLabel = submitBtn.textContent;
@@ -436,6 +551,13 @@ async function submitToCheckout() {
         payload.pdfFilename = `GRC-Submission-${safeName}.pdf`;
     } catch (e) {
         console.warn('PDF generation failed, continuing without attachment:', e);
+    }
+
+    try {
+        payload.fileAttachments = await collectFileAttachments();
+    } catch (e) {
+        console.warn('File attachment read failed, continuing without them:', e);
+        payload.fileAttachments = [];
     }
 
     submitBtn.textContent = 'Preparing checkout…';
@@ -473,6 +595,84 @@ async function submitToCheckout() {
         submitBtn.disabled = false;
         submitBtn.textContent = originalLabel;
         showSubmissionPopup(err.message || 'Submission failed. Please try again.', 'error');
+    }
+}
+
+// =====================================================================
+// SUBMISSION → FREE (INACTIVE) LISTING
+// =====================================================================
+async function submitFree() {
+    if (isSubmitting) return;
+
+    const firstInvalidPage = validateAllPages();
+    if (firstInvalidPage !== null) {
+        currentPage = firstInvalidPage;
+        showPage(currentPage);
+        saveFormData();
+        showSubmissionPopup(
+            `Some required fields on page ${firstInvalidPage} need attention before you can submit.`,
+            'error'
+        );
+        return;
+    }
+
+    if (!enforceFileLimits()) return;
+
+    isSubmitting = true;
+    const originalLabel = submitFreeBtn.textContent;
+    submitFreeBtn.disabled = true;
+    submitFreeBtn.textContent = 'Generating PDF…';
+
+    const payload = gatherFormPayload();
+
+    try {
+        await ensureJsPDFLoaded();
+        payload.pdfBase64 = getPDFAsBase64();
+        const rawName = payload.companyName || 'submission';
+        const safeName = rawName.replace(/[^a-zA-Z0-9-_]/g, '_').slice(0, 50);
+        payload.pdfFilename = `GRC-Submission-${safeName}.pdf`;
+    } catch (e) {
+        console.warn('PDF generation failed, continuing without attachment:', e);
+    }
+
+    try {
+        payload.fileAttachments = await collectFileAttachments();
+    } catch (e) {
+        console.warn('File attachment read failed, continuing without them:', e);
+        payload.fileAttachments = [];
+    }
+
+    submitFreeBtn.textContent = 'Submitting…';
+
+    try {
+        const response = await fetch(FREE_API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || !result.ok) {
+            const msg = result.message || `Server error (${response.status}). Please try again or contact wg@grcreport.com.`;
+            throw new Error(msg);
+        }
+
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (e) { /* ignore */ }
+
+        showSubmissionPopup(
+            'Your submission has been received. It will appear in the directory as Inactive until you activate it.',
+            'success'
+        );
+    } catch (err) {
+        console.error('Free submission error:', err);
+        showSubmissionPopup(err.message || 'Submission failed. Please try again.', 'error');
+    } finally {
+        isSubmitting = false;
+        submitFreeBtn.disabled = false;
+        submitFreeBtn.textContent = originalLabel;
     }
 }
 
@@ -529,6 +729,12 @@ if (formElement) {
     formElement.addEventListener('submit', (e) => {
         e.preventDefault();
         submitToCheckout();
+    });
+}
+
+if (submitFreeBtn) {
+    submitFreeBtn.addEventListener('click', () => {
+        submitFree();
     });
 }
 
