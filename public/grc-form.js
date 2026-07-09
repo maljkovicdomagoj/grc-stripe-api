@@ -3,6 +3,7 @@
 // =====================================================================
 const API_ENDPOINT = 'https://grc-stripe-api.vercel.app/api/create-checkout';
 const FREE_API_ENDPOINT = 'https://grc-stripe-api.vercel.app/api/create-free-submission';
+const HOME_URL = 'https://stack.grcreport.com/';
 const TOTAL_PAGES = document.querySelectorAll('.page').length || 22;
 const AUTOSAVE_DELAY = 1000;
 const STORAGE_KEY = 'grcQuestionnaire';
@@ -472,9 +473,15 @@ if (productMaterialsInput) productMaterialsInput.addEventListener('change', enfo
 // =====================================================================
 // POPUP
 // =====================================================================
-function showSubmissionPopup(msg, kind = 'success') {
+// True only while the popup is showing the free-submission success confirmation —
+// reset on every showSubmissionPopup() call, so it never leaks into unrelated popups
+// (e.g. errors, or the paid flow, which doesn't use this popup at all).
+let popupIsFreeSuccess = false;
+
+function showSubmissionPopup(msg, kind = 'success', { freeSuccess = false } = {}) {
     if (!submissionPopup || !popupContent) return;
     clearTimeout(popupDismissTimeout);
+    popupIsFreeSuccess = freeSuccess;
     if (popupMessage) popupMessage.textContent = msg;
     if (popupTitle) popupTitle.textContent = kind === 'error' ? 'Action Required' : 'Heads up';
 
@@ -484,7 +491,9 @@ function showSubmissionPopup(msg, kind = 'success') {
     submissionPopup.setAttribute('aria-hidden', 'false');
     if (popupCloseBtn) popupCloseBtn.focus();
 
-    if (kind === 'success') {
+    // Free-success stays open until the user explicitly acknowledges it (which redirects
+    // home) — don't auto-dismiss it out from under that flow.
+    if (kind === 'success' && !popupIsFreeSuccess) {
         popupDismissTimeout = setTimeout(hideSubmissionPopup, 7000);
     }
 }
@@ -494,6 +503,19 @@ function hideSubmissionPopup() {
     clearTimeout(popupDismissTimeout);
     submissionPopup.classList.remove('visible');
     submissionPopup.setAttribute('aria-hidden', 'true');
+}
+
+// Bound to the popup's acknowledge/close buttons. Redirects home only when the popup
+// currently showing is the free-submission success confirmation; otherwise just closes it.
+function dismissSubmissionPopup() {
+    if (popupIsFreeSuccess) {
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (e) { /* ignore — already cleared on submit in the common case */ }
+        window.location.href = HOME_URL;
+        return;
+    }
+    hideSubmissionPopup();
 }
 
 // =====================================================================
@@ -664,7 +686,8 @@ async function submitFree() {
 
         showSubmissionPopup(
             'Your submission has been received. It will appear in the directory as Inactive until you activate it.',
-            'success'
+            'success',
+            { freeSuccess: true }
         );
     } catch (err) {
         console.error('Free submission error:', err);
@@ -761,8 +784,8 @@ if (submissionPopup) {
         if (e.target === submissionPopup) hideSubmissionPopup();
     });
 }
-if (popupCloseBtn) popupCloseBtn.addEventListener('click', hideSubmissionPopup);
-if (popupAcknowledgeBtn) popupAcknowledgeBtn.addEventListener('click', hideSubmissionPopup);
+if (popupCloseBtn) popupCloseBtn.addEventListener('click', dismissSubmissionPopup);
+if (popupAcknowledgeBtn) popupAcknowledgeBtn.addEventListener('click', dismissSubmissionPopup);
 
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && submissionPopup && submissionPopup.classList.contains('visible')) {
